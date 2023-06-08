@@ -1,2 +1,2 @@
 # DESEQ2
-Differential gene expression analysis using DESeq2
+Code to run Differential gene expression analysis using DESeq2
