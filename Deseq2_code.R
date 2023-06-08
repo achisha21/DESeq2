@@ -1,4 +1,4 @@
-#############DESEQ2 for info.csv control vs tested##############################
+#############DESEQ2 for info.csv##############################
 
 setwd("/Users/achisha_saikia/Documents/Salivary glands/Mouse salivary glands/DESEQ2_All_glands_CD1_vs_C57/")
 library("DESeq2")
