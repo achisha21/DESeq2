@@ -1,0 +1,1224 @@
+---
+title: "edgeR-Based Differential Expression Analysis of Mouse Salivary Glands"
+author: "Achisha Saikia"
+date: "2024-11-04"
+output: html_document
+---
+
+
+**Pipeline:**
+
+1) Loading Data and Packages
+
+2) Quality control of Raw Counts 
+
+3) Filtering and Normalization
+
+4) Quality control of data, post filering and normalization
+
+5) Set up design matrix and contrasts 
+
+6) Estimate Dispersion and Fit the Model
+
+7) Perform Differential Expression Tests
+
+8) Visualization plots 
+- Par vs SL - MA Plot
+- Par vs SM - Volcano Plot
+- SL vs SM - Heatmap
+
+9) Pathway analysis
+- Par vs SL = Gene Ontology
+- Par vs SM = KEGG
+- SL vs SM = Reactome
+
+10) Gene Set Enrichment Analysis
+
+**1) Loading Data and Packages**
+```{r, warning=FALSE, error=FALSE, message=FALSE}
+# Set working directory to project folder
+setwd("~/Documents/Project/Salivary_glands_project")
+
+# Load required libraries
+library(edgeR)           # Differential expression analysis
+library(ggplot2)         # Data visualization
+library(RColorBrewer)    # Color palettes
+library(reshape2)        # Data reshaping
+library(pheatmap)        # Heatmap visualization
+library(ggrepel)         # Enhanced text labels in ggplot2
+library(kableExtra)      # Enhanced tables
+library(clusterProfiler) # Functional profiling of gene clusters
+library(org.Mm.eg.db)    # Mouse genome annotation
+library(ReactomePA)      # Reactome pathway analysis
+library(annotables)      # Gene annotations
+library(tidyverse)       # Data manipulation and visualization
+library(AnnotationDbi)   # Annotation interface
+library(EnhancedVolcano) # Enhanced volcano plots
+library(enrichplot)      # Enrichment visualization
+library(ggforce)         # For bubble shapes around clusters
+library(msigdbr)         # For MSigDB gene sets
+library(ggridges)        # Ridge Plots
+library(KEGGREST)        #Allows access to the KEGG REST API
+
+# Set working directory
+setwd("~/Documents/Project/Salivary_glands_project")  # Update this path as necessary
+
+# Imported raw count data from featurecounts tool
+Data<- read.csv("readCounts2.tsv",
+                header = TRUE, 
+                sep = '\t',
+                row.names = 'Geneid',
+                skip=1)
+
+# View(Data)
+
+# Dropped extra columns from featureCount output
+drops <- c("Chr","Start","End","Strand","Length")
+# head(drops)
+Data <- Data[ , !(names(Data) %in% drops)]
+# colnames(Data)
+
+# Converted count data to matrix and ensure integer mode
+countData <- as.matrix(Data)
+mode(countData) <- "integer"
+
+# View(countData)
+
+# Loaded colData as metadata
+metadata <- read.csv("info.csv", sep=",", row.names=1)
+
+# Displayed first 50 rows of metadata
+kable(head(metadata, 50), digits=5) %>% kable_styling("striped", full_width = FALSE, position = "center") %>% scroll_box(width = "55%", height = "500px")
+```
+
+
+
+
+```{r}
+
+# Checked all sample IDs in colData are also in CountData 
+all(rownames(metadata) %in% colnames(countData))
+```
+
+```{r}
+# Checking and matching the order of countData and metadata
+countData <- countData[, rownames(metadata)]
+all(rownames(metadata) == colnames(countData))
+```
+
+
+**2) Quality Control: Raw Counts**
+
+```{r}
+# Created a DGEList object with raw counts for downstream analysis and quality control
+raw_counts <- DGEList(counts = countData)
+
+```
+
+
+1. Inspecting Library Sizes
+```{r, fig.align='center', fig.height=6, fig.width=10}
+
+# Calculated and summarized library sizes
+library_sizes <- colSums(raw_counts$counts)
+summary(library_sizes)
+
+# Created a barplot to vizualize library sizes
+ggplot(data = data.frame(Sample = names(library_sizes), Counts = library_sizes),
+       aes(x = Sample, y = Counts)) +
+  geom_bar(stat = "identity", fill = "skyblue") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(title = "Library Sizes", x = "Sample", y = "Total Counts")
+
+```
+
+2. Distribution of Raw Counts
+
+```{r, fig.align='center', fig.height=6, fig.width=10}
+
+# Calculated log2 CPM values from raw counts
+log_cpm <- cpm(raw_counts, log = TRUE, prior.count = 1)
+
+# Prepared data for boxplot viz.
+log_cpm_long <- melt(as.data.frame(log_cpm), id.vars = NULL, variable.name = "Sample", value.name = "Log2_CPM")
+log_cpm_long$Strain <- metadata$Strain[match(log_cpm_long$Sample, rownames(metadata))]
+
+# Plotted boxplots of gene expression distributions
+ggplot(log_cpm_long, aes(x = Sample, y = Log2_CPM, fill = Strain)) +
+  geom_boxplot(outlier.shape = NA, alpha = 0.7) +
+  scale_fill_brewer(palette = "Set1") +
+  labs(title = "Gene Expression Distribution (Raw Counts)", x = "Sample", y = "Log2(CPM + 1)") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        plot.title = element_text(hjust = 0.5, size = 14)) +
+  guides(fill = guide_legend(title = "Strain"))
+
+```
+
+3. Pearson correlation
+
+```{r, fig.align='center', fig.height=6, fig.width=10}
+
+# Calculated Pearson correlation matrix
+cor_matrix <- cor(log_cpm, method = "pearson")
+
+# Defined a color palette for heatmap
+color_palette <- colorRampPalette(brewer.pal(9, "RdYlBu"))(50)
+
+# Prepared annotation for heatmap
+annotation_col <- data.frame(
+  Strain = metadata$Strain,
+  Glands = metadata$Glands,
+  Sex = metadata$Sex
+)
+rownames(annotation_col) <- rownames(metadata)
+
+# Generated correlation heatmap with annotations
+pheatmap(cor_matrix, 
+         main = "Pearson Correlation Heatmap (Raw Counts)", 
+         color = color_palette,
+         clustering_distance_rows = "correlation", 
+         clustering_distance_cols = "correlation", 
+         border_color = NA,
+         display_numbers = FALSE,
+         fontsize_row = 8,
+         fontsize_col = 9,
+         annotation_col = annotation_col,
+         fontsize = 10)
+
+```
+4. Euclidean Distance
+
+```{r, fig.align='center', fig.height=6, fig.width=10}
+
+# Calculated Euclidean distance matrix
+dist_matrix <- dist(t(log_cpm), method = "euclidean")
+dist_matrix_full <- as.matrix(dist_matrix)
+
+# Plotted heatmap with annotations, used the same color palette as the heatmap for Pearson correlation
+pheatmap(dist_matrix_full, 
+         main = "Euclidean Distance Heatmap (Raw Counts)", 
+         color = color_palette,
+         border_color = NA,
+         display_numbers = FALSE,
+         fontsize_row = 8,
+         fontsize_col = 9,
+         annotation_col = annotation_col,
+         fontsize = 10)
+```
+
+5. Principal Component Analysis
+
+```{r, fig.align='center', fig.height=8, fig.width=12}
+
+# Defined color palette for Glands and Sex
+gland_colors <- c("Par" = "cyan2", "SL" = "seagreen1", "SM" = "lightcoral") # Assign colors to each gland type
+sex_colors <- c("Male" = "purple", "Female" = "red") # Colors for Sex
+
+# Performed PCA
+pca <- prcomp(t(log_cpm), scale. = TRUE)
+
+# Extracted PCA data and calculated variance explained
+pca_data <- as.data.frame(pca$x)
+percentVar <- round(100 * (pca$sdev^2 / sum(pca$sdev^2)), 1)
+
+# Added sample metadata to PCA results
+pca_data$SampleID <- rownames(pca_data)
+pca_data$Strain <- metadata$Strain[match(pca_data$SampleID, rownames(metadata))]
+pca_data$Glands <- metadata$Glands[match(pca_data$SampleID, rownames(metadata))]
+pca_data$Sex <- metadata$Sex[match(pca_data$SampleID, rownames(metadata))]
+
+# Plot PCA
+ggplot(pca_data, aes(x = PC1, y = PC2, color = Glands, shape = Glands)) +
+  geom_point(size = 3) +
+#  geom_text_repel(size = 3, fontface = "bold", max.overlaps = 10, box.padding = 0.3, point.padding = 0.5) +
+  scale_color_manual(values = gland_colors) +
+  scale_shape_manual(values = c("Par" = 16, "SL" = 17, "SM" = 15)) + # Different shapes for each gland type
+  xlab(paste0("PC1: ", percentVar[1], "% variance")) +
+  ylab(paste0("PC2: ", percentVar[2], "% variance")) +
+  labs(title = "PCA Plot of Gene Expression Data (Raw Counts)") +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 16, face = "bold"),
+    axis.title = element_text(size = 12, face = "bold"),
+    axis.text = element_text(size = 10),
+    strip.text = element_text(size = 12, face = "bold"),
+    legend.title = element_text(size = 12),
+    legend.text = element_text(size = 10),
+    legend.position = "right"
+  ) +
+  guides(color = guide_legend(title = "Glands"),
+         shape = guide_legend(title = "Glands")) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "grey50") +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "grey50") +
+  geom_mark_ellipse(aes(fill = Sex), alpha = 0.1, color = NA) + # Ellipses filled based on Sex
+  facet_wrap(~ Strain) + # Facet by Strain
+  scale_fill_manual(values = sex_colors) + # Custom fill colors for ellipses based on Sex
+  theme(panel.grid.major = element_line(color = "grey80"),
+        panel.grid.minor = element_blank(),
+        panel.border = element_blank())
+
+```
+
+**3) Filtering and Normalization**
+
+```{r}
+# Created group factor based on gland types
+group <- factor(metadata$Glands)
+
+# Created DGEList object with group information
+y <- DGEList(counts = countData, group = group)
+
+# Filtered lowly expressed genes
+keep <- filterByExpr(y)
+y <- y[keep, , keep.lib.sizes = FALSE]
+
+# Normalized the data using TMM method
+y <- calcNormFactors(y)
+
+# Displayed the first 50 rows of the normalized sample information
+kable(head(y$samples, 50), digits=5) %>% kable_styling("striped", full_width = FALSE, position = "center") %>% scroll_box(width = "50%", height = "500px")
+```
+
+
+```{r}
+
+# Calculated log2 CPM values after normalization
+log_cpm_norm <- cpm(y, log=TRUE, prior.count=1)
+
+```
+
+**4) Quality Control: Post normalization**
+
+1. Distribution of Normalized Counts
+
+```{r, fig.align='center', fig.height=6, fig.width=10}
+
+# Prepared the data for visualization
+log_cpm_norm_long <- melt(as.data.frame(log_cpm_norm), id.vars = NULL, variable.name = "Sample", value.name = "Log2_CPM")
+log_cpm_norm_long$Strain <- metadata$Strain[match(log_cpm_norm_long$Sample, rownames(metadata))]
+
+# Plotted boxplots of gene expression distributions
+ggplot(log_cpm_norm_long, aes(x = Sample, y = Log2_CPM, fill = Strain)) +
+  geom_boxplot(outlier.shape = NA, alpha = 0.7) +
+  scale_fill_brewer(palette = "Set1") +
+  labs(title = "Gene Expression Distribution (Raw Counts)", x = "Sample", y = "Log2(CPM + 1)") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        plot.title = element_text(hjust = 0.5, size = 14)) +
+  guides(fill = guide_legend(title = "Strain"))
+
+```
+
+2. Pearson Correlation
+
+```{r, fig.align='center', fig.height=6, fig.width=10}
+
+# Calculated Pearson correlation matrix for normalized data
+cor_matrix_norm <- cor(log_cpm_norm, method = "pearson")
+
+# Generated heatmap to vizualize sample correlation using pearson method
+pheatmap(cor_matrix_norm, 
+         main = "Pearson Correlation Heatmap (Normalized Counts)", 
+         color = color_palette,
+         clustering_distance_rows = "correlation", 
+         clustering_distance_cols = "correlation", 
+         border_color = NA,
+         display_numbers = FALSE,
+         fontsize_row = 8,
+         fontsize_col = 9,
+         annotation_col = annotation_col,  # Strain, Glands, Sex
+         fontsize = 10)
+```
+
+3. Euclidean Distance
+
+```{r, fig.align='center', fig.height=6, fig.width=10}
+
+# Calculated Euclidean distance matrix
+dist_matrix_norm <- dist(t(log_cpm_norm), method = "euclidean")
+dist_matrix_full_norm <- as.matrix(dist_matrix_norm)
+
+# Plot heatmap with annotations, used same color palette as pearson heatmap
+pheatmap(dist_matrix_full_norm, 
+         main = "Euclidean Distance Heatmap (Normalized Counts)", 
+         color = color_palette,
+         border_color = NA,
+         display_numbers = FALSE,
+         fontsize_row = 8,
+         fontsize_col = 9,
+         annotation_col = annotation_col,  # Strain, Glands, Sex
+         fontsize = 10)
+```
+
+4. PCA Plot
+
+```{r, fig.align='center', fig.height=8, fig.width=12}
+
+# Define color palette for Glands and Sex
+strain_colors <- c("Par" = "cyan2", "SL" = "seagreen1", "SM" = "lightcoral") # Assign colors to each gland type
+sex_colors <- c("Male" = "purple", "Female" = "red") # Colors for Sex
+
+# Performed PCA
+pca_norm <- prcomp(t(log_cpm_norm), scale. = TRUE)
+
+# Extracted PCA data and calculate variance explained
+pca_data_norm <- as.data.frame(pca_norm$x)
+percentVar_norm <- round(100 * (pca_norm$sdev^2 / sum(pca_norm$sdev^2)), 1)
+
+# Added sample metadata to PCA results
+pca_data_norm$SampleID <- rownames(pca_data_norm)
+pca_data_norm$Strain <- metadata$Strain[match(pca_data_norm$SampleID, metadata$Sample)]
+pca_data_norm$Glands <- metadata$Glands[match(pca_data_norm$SampleID, metadata$Sample)]
+pca_data_norm$Sex <- metadata$Sex[match(pca_data_norm$SampleID, metadata$Sample)]
+
+# Generated PCA plot and vizualized it using ggplot2
+ggplot(pca_data_norm, aes(x = PC1, y = PC2, color = Glands, shape = Glands)) +
+  geom_point(size = 3) +
+#  geom_text_repel(size = 3, fontface = "bold", max.overlaps = 10, box.padding = 0.3, point.padding = 0.5) +
+  scale_color_manual(values = strain_colors) +
+  xlab(paste0("PC1: ", percentVar_norm[1], "% variance")) +
+  ylab(paste0("PC2: ", percentVar_norm[2], "% variance")) +
+  labs(title = "PCA Plot of Gene Expression Data (Normalized Counts)") +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 16, face = "bold"),
+    axis.title = element_text(size = 12, face = "bold"),
+    axis.text = element_text(size = 10),
+    strip.text = element_text(size = 12, face = "bold"),
+    legend.title = element_text(size = 12),
+    legend.text = element_text(size = 10),
+    legend.position = "right"
+  ) +
+  guides(color = guide_legend(title = "Glands"),
+         shape = guide_legend(title = "Glands")) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "grey50") +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "grey50") +
+  geom_mark_ellipse(aes(fill = Sex), alpha = 0.1, color = NA) + 
+  facet_wrap(~ Strain) + # Facet by Strain
+  scale_fill_manual(values = sex_colors) + 
+  theme(panel.grid.major = element_line(color = "grey80"),
+        panel.grid.minor = element_blank(),
+        panel.border = element_blank())
+```
+
+
+**4) Set Up the Design Matrix and Contrasts**
+
+```{r}
+# Converted the Glands column in metadata to a factor
+metadata$Glands <- factor(metadata$Glands)
+
+# Viewed the levels of Glands
+levels(metadata$Glands)
+```
+
+```{r}
+
+# Set up the design matrix without an intercept (for pairwise comparisons)
+design <- model.matrix(~ 0 + Glands, data = metadata)
+colnames(design) <- levels(metadata$Glands)  # Name columns as Glands
+
+# Displayed the first 60 rows of the design matrix
+kable(head(design, 55), digits=5) %>% kable_styling("striped", full_width = FALSE) %>% scroll_box(width = "32%", height = "500px")
+
+```
+
+
+**5) Estimate Dispersion and Fit the Model**
+
+```{r, fig.align='center', fig.height=6, fig.width=10}
+
+# Assigned the design matrix to the DGEList object and estimated dispersion
+y <- estimateDisp(y, design)
+
+# Plotted BCV (Biological Coefficient of Variation) to assess dispersion estimates
+plotBCV(y)
+
+```
+
+
+```{r}
+# Fitted the generalized linear model using the quasi-likelihood method
+fit_qlf <- glmQLFit(y, design)
+
+```
+
+**Define Contrasts for Pairwise Comparisons**
+
+```{r}
+# Defined the contrasts 
+contrast_matrix <- makeContrasts(
+  Par_vs_SL = Par - SL,
+  Par_vs_SM = Par - SM,
+  SL_vs_SM  = SL - SM,
+  levels = design
+)
+
+# View the contrast matrix
+head(contrast_matrix)
+```
+
+**7) Performing Differential Expression Tests**
+
+Using the contrasts to perform the quasi-likelihood F-tests for each comparison.
+Function "glmQLFTest" performs quasi-likelihood F-test for each contrast 
+
+```{r}
+# quasi-likelihood F-test were performed for each contrast individually
+
+# Contrast 1: Par vs SL
+qlf_Par_vs_SL <- glmQLFTest(fit_qlf, contrast = contrast_matrix[,"Par_vs_SL"])
+
+# Contrast 2: Par vs SM
+qlf_Par_vs_SM <- glmQLFTest(fit_qlf, contrast = contrast_matrix[,"Par_vs_SM"])
+
+# Contrast 3: SL vs SM
+qlf_SL_vs_SM <- glmQLFTest(fit_qlf, contrast = contrast_matrix[,"SL_vs_SM"])
+
+
+```
+
+
+**Identify Upregulated and Downregulated Genes for Each Contrast**
+
+
+topTags function in edgeR extracts and organizes differentially expressed genes from statistical test results.
+```{r}
+# Number of genes to display/save was set (n=Inf to include all genes)
+n_genes <- Inf
+
+# Par vs SL
+topTags_Par_vs_SL <- topTags(qlf_Par_vs_SL, n = n_genes) #A variable topTags_Par_vs_SL is created where the        extracted top genes are stored. 
+
+results_Par_vs_SL <- topTags_Par_vs_SL$table #results_Par_vs_SL variable holds table from topTags object
+results_Par_vs_SL$Gene_names <- rownames(results_Par_vs_SL) #Rownames that contains gene names now have their own column called gene names. This column will help during vizualization.
+
+
+# Par vs SM
+topTags_Par_vs_SM <- topTags(qlf_Par_vs_SM, n = n_genes)
+results_Par_vs_SM <- topTags_Par_vs_SM$table
+results_Par_vs_SM$Gene_names <- rownames(results_Par_vs_SM)
+
+
+# SL vs SM
+topTags_SL_vs_SM <- topTags(qlf_SL_vs_SM, n = n_genes)
+results_SL_vs_SM <- topTags_SL_vs_SM$table
+results_SL_vs_SM$Gene_names <- rownames(results_SL_vs_SM)
+
+
+```
+
+
+FDR of 5% is examined with the function "decideTests"
+
+```{r}
+# Par vs SL
+kable(head(results_Par_vs_SL, 20), digits=50, caption = "Top 20 DE Genes: Par vs SL") %>%
+  kable_styling("striped", full_width = FALSE, position = "center")  %>% scroll_box(width = "80%", height = "500px")
+
+# This summary was based on significance determined by FDR 
+summary(decideTests(results_Par_vs_SL$FDR))
+
+# Par vs SM
+kable(head(results_Par_vs_SM, 20), digits=50, caption = "Top 20 DE Genes: Par vs SM") %>%
+  kable_styling("striped", full_width = FALSE, position = "center")  %>% scroll_box(width = "80%", height = "500px")
+
+# This summary was based on significance determined by FDR 
+summary(decideTests(results_Par_vs_SM$FDR))
+
+# SL vs SM
+kable(head(results_SL_vs_SM, 20), digits=50, caption = "Top 20 DE Genes: SL vs SM") %>%
+  kable_styling("striped", full_width = FALSE, position = "center") %>% scroll_box(width = "80%", height = "500px")
+
+# This summary was based on significance determined by FDR 
+summary(decideTests(results_SL_vs_SM$FDR))
+```
+
+**Identifying upregulated and downregulated genes**
+
+A) Par vs SL
+```{r}
+
+# Upregulated genes were identified following the filtering parameters of logFC ≥ 1 and FDR < 0.05
+upregulated_Par_vs_SL <- results_Par_vs_SL[
+  results_Par_vs_SL$FDR < 0.05 & results_Par_vs_SL$logFC >= 1, ]
+
+# Downregulated genes were identified following the filtering parameters of logFC ≤ 1 and FDR < 0.05
+downregulated_Par_vs_SL <- results_Par_vs_SL[
+  results_Par_vs_SL$FDR < 0.05 & results_Par_vs_SL$logFC <= -1, ]
+
+# Top 20 upregulated genes were displayed
+
+kable(head(upregulated_Par_vs_SL, 20), digits = 50, caption = "Top 20 Upregulated Genes: Par vs SL") %>%
+  kable_styling("striped", full_width = FALSE, position = "center") %>% scroll_box(width = "80%", height = "500px")
+
+
+# Top 20 downregulated genes were displayed
+
+kable(head(downregulated_Par_vs_SL, 20), digits = 50, caption = "Top 20 Downregulated Genes: Par vs SL") %>%
+  kable_styling("striped", full_width = FALSE, position = "center") %>% scroll_box(width = "80%", height = "500px")
+
+```
+
+
+B) Par vs SM
+
+```{r}
+
+# Upregulated genes were identified following the filtering parameters of logFC ≥ 1 and FDR < 0.05
+upregulated_Par_vs_SM <- results_Par_vs_SM[
+  results_Par_vs_SM$FDR < 0.05 & results_Par_vs_SM$logFC >= 1, ]
+
+# Downregulated genes were identified following the filtering parameters of logFC ≤ 1 and FDR < 0.05
+downregulated_Par_vs_SM <- results_Par_vs_SM[
+  results_Par_vs_SM$FDR < 0.05 & results_Par_vs_SM$logFC <= -1, ]
+
+# Top 20 upregulated genes were displayed
+
+kable(head(upregulated_Par_vs_SM, 20), digits = 50, caption = "Top 20 Upregulated Genes: Par vs SM") %>%
+  kable_styling("striped", full_width = FALSE, position = "center") %>% scroll_box(width = "80%", height = "500px")
+
+# Top 20 downregulated genes were displayed
+
+kable(head(downregulated_Par_vs_SM, 20), digits = 50, caption = "Top 20 Downregulated Genes: Par vs SM") %>%
+  kable_styling("striped", full_width = FALSE, position = "center") %>% scroll_box(width = "80%", height = "500px")
+```
+
+
+C) SL vs SM
+
+```{r}
+
+# Upregulated genes were identified following the filtering parameters of logFC ≥ 1 and FDR < 0.05
+upregulated_SL_vs_SM <- results_SL_vs_SM[
+  results_SL_vs_SM$FDR < 0.05 & results_SL_vs_SM$logFC >= 1, ]
+
+# Downregulated genes were identified following the filtering parameters of logFC ≤ 1 and FDR < 0.05
+downregulated_SL_vs_SM <- results_SL_vs_SM[
+  results_SL_vs_SM$FDR < 0.05 & results_SL_vs_SM$logFC <= -1, ]
+
+# Top 20 upregulated genes were displayed
+
+kable(head(upregulated_SL_vs_SM, 20), digits = 50, caption = "Top 20 Upregulated Genes: SL vs SM") %>%
+  kable_styling("striped", full_width = FALSE) %>% scroll_box(width = "80%", height = "500px")
+
+# Top 20 downregulated genes were displayed
+
+kable(head(downregulated_SL_vs_SM, 20), digits = 50, caption = "Top 20 Downregulated Genes: SL vs SM") %>%
+  kable_styling("striped", full_width = FALSE) %>% scroll_box(width = "80%", height = "500px")
+
+
+```
+
+
+DEG counts:
+
+Par vs SL:
+Number of Upregulated Genes: 2483 
+
+Par vs SL:
+Number of Downregulated Genes: 1454 
+
+Par vs SM:
+Number of Upregulated Genes: 2135 
+
+Par vs SM:
+Number of Downregulated Genes: 1027 
+
+SL vs SM:
+Number of Upregulated Genes: 1082 
+
+SL vs SM:
+Number of Downregulated Genes: 1082 
+
+
+
+**8) Vizualization plots**
+
+1) MA plots 
+
+A) Par vs SL
+
+```{r, fig.align='center', fig.height=6, fig.width=10}
+
+# Defined thresholds for significance
+fdr_threshold <- 0.05
+logfc_threshold <- 1
+
+# Selected the results for Par vs SL comparison
+top_genes_Par_vs_SL <- results_Par_vs_SL
+
+# Classified genes based on logFC and FDR
+top_genes_Par_vs_SL$Significance <- "Not Significant"
+top_genes_Par_vs_SL$Significance[top_genes_Par_vs_SL$logFC >= logfc_threshold & top_genes_Par_vs_SL$FDR < fdr_threshold] <- "Upregulated"
+top_genes_Par_vs_SL$Significance[top_genes_Par_vs_SL$logFC <= -logfc_threshold & top_genes_Par_vs_SL$FDR < fdr_threshold] <- "Downregulated"
+
+# Created an MA plot, colored the plot as per significance determined by the logfc and FDR thresholds
+ggplot(top_genes_Par_vs_SL, aes(x = logCPM, y = logFC)) +
+  geom_point(aes(color = Significance), alpha = 0.6, size = 1.5) +  
+  scale_color_manual(values = c("Not Significant" = "grey", 
+                                "Upregulated" = "purple", 
+                                "Downregulated" = "pink")) +  # Custom colors for categories
+  labs(title = "MA Plot - Par vs SM",
+       x = "Average Log CPM",
+       y = "Log Fold Change") +  
+  theme_minimal() +  
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 16, face = "bold"),  
+    axis.title = element_text(size = 14),  
+    legend.title = element_blank(),  
+    legend.position = "top",  
+    legend.text = element_text(size = 12)  
+  ) + 
+  geom_hline(yintercept = 0, linetype = "dashed", color = "black")  
+
+```
+
+2) Volcano Plots
+
+B) Par_vs_SM
+```{r, fig.height = 8, fig.align='center', fig.width=10}
+
+# Create the volcano plot with adjusted p-values (FDR) using EnhancedVolcano function from the EnhancedVolcano package
+EnhancedVolcano(results_Par_vs_SM,
+    lab = results_Par_vs_SM$Gene_names,                           # Labels for each gene
+    x = 'logFC',                                                  # X-axis: log fold change
+    y = 'FDR',                                                    # Y-axis: FDR (adjusted p-values)
+    pCutoff = 0.05,                                               # Cutoff for FDR significance
+    FCcutoff = 1,                                                 # Fold change cutoff
+    title = 'Volcano Plot (Par vs  SM)',                           # Plot title
+    xlim = c(-10, 10),                                            # Adjust logFC range if needed
+    ylim = c(0, -log10(min(results_Par_vs_SM$FDR, na.rm=TRUE))),  # Adjust FDR y-axis
+    pointSize = 1.0,                                              # Point size for each gene
+    labSize = 3.0                                                 # Label size
+)
+
+```
+
+3) Heatmaps:
+Building heatmap based on FDR cut off 0.05
+
+
+C) SL vs SM
+
+```{r , fig.height = 6, fig.align='center', fig.width=10}
+
+# Calculated normalized counts are stored in a variable normCounts
+normCounts <- cpm(y, normalized.lib.sizes = TRUE, log = TRUE)
+
+# From the topTags table, Filtered significant genes for SL vs SM comparison are stored in sigGenes_SL_vs_SM
+sigGenes_SL_vs_SM <- topTags_SL_vs_SM$table
+sigGenes_SL_vs_SM <- sigGenes_SL_vs_SM[sigGenes_SL_vs_SM$FDR < 0.05, ]
+sigGenes_SL_vs_SM <- sigGenes_SL_vs_SM[order(sigGenes_SL_vs_SM$FDR), ]
+
+# Selected relevant samples for the comparison
+selected_samples_SL_vs_SM <- c("SL_1A_Mal",  "SL_1B_Mal",  "SL_2A_Mal",  "SL_2B_Mal",  "SL_3A_Mal",  "SL_3B_Mal", "SL_4A_Fem",  "SL_4B_Fem",  "SL_5A_Fem",  "SL_5B_Fem", "SL_6A_Fem",  "SL_6B_Fem","SM_1A_Mal",  "SM_1B_Mal",  "SM_2A_Mal",  "SM_2B_Mal",  "SM_3A_Mal",  "SM_3B_Mal", "SM_4A_Fem",  "SM_4B_Fem",  "SM_5A_Fem",  "SM_5B_Fem",  "SM_6A_Fem",  "SM_6B_Fem")
+
+# Selecting our relevant samples from normCounts table and storing in another variable normCounts2
+normCounts2 <- normCounts[, selected_samples_SL_vs_SM]
+
+# Filtered to include only significant genes for SL_vs_SM
+normCounts2 <- normCounts2[rownames(normCounts2) %in% rownames(sigGenes_SL_vs_SM), ]
+
+# Selected top 50 significant genes for visualization
+topSigGenes_SL_vs_SM <- head(normCounts2, 50)
+
+# Defined strain annotation for SL and SM samples
+strain_info_SL_vs_SM <- data.frame(
+  Strain = c(rep("SL", 12), rep("SM", 12))
+)
+
+#Making the selected relevant samples as rownames
+rownames(strain_info_SL_vs_SM) <- selected_samples_SL_vs_SM
+
+# Defined colors for the strain annotation
+strain_colors_SL_vs_SM <- list(Strain = c("SL" = "palegreen", "SM" = "paleturquoise1"))
+
+# Generated the heatmap for the top significant genes for SL vs SM by using the function pheatmap from pheatmap package
+pheatmap(topSigGenes_SL_vs_SM, scale = 'row', show_rownames = TRUE, treeheight_row = F, treeheight_col = 0, cluster_rows = TRUE, cluster_cols = FALSE, fontsize_row = 5, labels_col = selected_samples_SL_vs_SM, annotation_col = strain_info_SL_vs_SM, annotation_colors = strain_colors_SL_vs_SM, main = "Heatmap of SL vs SM (Top 50 genes)")
+
+```
+
+
+**9) Pathway analysis**
+
+Gene Ontology: BP, CC, MF of Par vs SL
+
+- Par vs SL: Upregulated
+
+```{r, fig.align='center', fig.height=6, fig.width=10, message=FALSE, warning=FALSE, error=FALSE}
+
+# Extracted the gene names from upregulated genes list and stored in a variable 'upregulated_genes_pathway_Par_vs_SL'
+upregulated_genes_pathway_Par_vs_SL <- rownames(upregulated_Par_vs_SL)
+
+# Extracted all genes tested in the differential expression analysis 
+all_genes_pathway_Par_vs_SL <- rownames(results_Par_vs_SL)
+
+# Convert gene symbols to Entrez IDs using org.Mm.eg.db
+upregulated_entrez_Par_vs_SL <- bitr(upregulated_genes_pathway_Par_vs_SL, fromType = "SYMBOL", toType = "ENTREZID", OrgDb = org.Mm.eg.db)$ENTREZID
+all_entrez_Par_vs_SL <- bitr(all_genes_pathway_Par_vs_SL, fromType = "SYMBOL", toType = "ENTREZID", OrgDb = org.Mm.eg.db)$ENTREZID
+
+# Run GO enrichment analysis for each category (BP, CC, MF) by using enrichGO
+ego_bp_Par_vs_SL <- enrichGO(
+  gene          = upregulated_entrez_Par_vs_SL,
+  universe      = all_entrez_Par_vs_SL,
+  keyType       = "ENTREZID",
+  OrgDb         = org.Mm.eg.db,
+  ont           = "BP",
+  pAdjustMethod = "BH",
+  qvalueCutoff  = 0.05,
+  readable      = TRUE
+)
+
+ego_cc_Par_vs_SL <- enrichGO(
+  gene          = upregulated_entrez_Par_vs_SL,
+  universe      = all_entrez_Par_vs_SL,
+  keyType       = "ENTREZID",
+  OrgDb         = org.Mm.eg.db,
+  ont           = "CC",
+  pAdjustMethod = "BH",
+  qvalueCutoff  = 0.05,
+  readable      = TRUE
+)
+
+ego_mf_Par_vs_SL <- enrichGO(
+  gene          = upregulated_entrez_Par_vs_SL,
+  universe      = all_entrez_Par_vs_SL,
+  keyType       = "ENTREZID",
+  OrgDb         = org.Mm.eg.db,
+  ont           = "MF",
+  pAdjustMethod = "BH",
+  qvalueCutoff  = 0.05,
+  readable      = TRUE
+)
+
+# Prepared the results for plotting by selecting top 15 terms for each category
+top_bp_Par_vs_SL <- ego_bp_Par_vs_SL@result %>%
+  arrange(p.adjust) %>%
+  top_n(15, wt = -pvalue) %>%
+  mutate(Category = "Biological Process", logPvalue = -log10(pvalue))
+
+top_cc_Par_vs_SL <- ego_cc_Par_vs_SL@result %>%
+  arrange(p.adjust) %>%
+  top_n(15, wt = -pvalue) %>%
+  mutate(Category = "Cellular Component", logPvalue = -log10(pvalue))
+
+top_mf_Par_vs_SL <- ego_mf_Par_vs_SL@result %>%
+  arrange(p.adjust) %>%
+  top_n(15, wt = -pvalue) %>%
+  mutate(Category = "Molecular Function", logPvalue = -log10(pvalue))
+
+combined_results_Par_vs_SL <- bind_rows(top_bp_Par_vs_SL, top_cc_Par_vs_SL, top_mf_Par_vs_SL)
+
+# Colorblind-friendly palette
+cb_palette <- brewer.pal(n = 3, name = "Set2")
+
+# Vizualized combined data in the form of barplots
+ggplot(combined_results_Par_vs_SL, aes(x = reorder(Description, pvalue), y = logPvalue, fill = Category)) +
+  geom_bar(stat = "identity") +
+  facet_wrap(~Category, scales = "free") +
+  theme_minimal() +
+  scale_fill_manual(values = cb_palette) +
+  labs(
+    x = "GO Term",
+    y = "-log10(p-value)",
+    title = "Top 15 Gene Function Classification (GO) for Upregulated Genes in Par vs SL"
+  ) +
+  theme(
+    axis.text.x = element_text(angle = 90, hjust = 1, vjust = 1, size = 8),
+    legend.title = element_blank(),
+    legend.position = "bottom",
+    plot.title = element_text(hjust = 0.5, size = 14, face = "bold")
+  ) +
+  guides(fill = guide_legend(reverse = TRUE))
+
+```
+
+
+- Par vs SL: Downregulated
+
+```{r, fig.align='center', fig.height=6, fig.width=10, message=FALSE, warning=FALSE, error=FALSE}
+
+# Extracted the gene names from downregulated genes list and stored in a variable 'downregulated_genes_pathway_Par_vs_SL'
+downregulated_genes_pathway_Par_vs_SL <- rownames(downregulated_Par_vs_SL)
+
+# Convert gene symbols to Entrez IDs using org.Mm.eg.db
+downregulated_entrez_Par_vs_SL <- bitr(downregulated_genes_pathway_Par_vs_SL, fromType = "SYMBOL", toType = "ENTREZID", OrgDb = org.Mm.eg.db)$ENTREZID
+all_entrez_Par_vs_SL <- bitr(all_genes_pathway_Par_vs_SL, fromType = "SYMBOL", toType = "ENTREZID", OrgDb = org.Mm.eg.db)$ENTREZID
+
+# Run GO enrichment analysis for each category (BP, CC, MF) by using enrichGO
+ego_bp_down_Par_vs_SL <- enrichGO(
+  gene          = downregulated_entrez_Par_vs_SL,
+  universe      = all_entrez_Par_vs_SL,
+  keyType       = "ENTREZID",
+  OrgDb         = org.Mm.eg.db,
+  ont           = "BP",
+  pAdjustMethod = "BH",
+  qvalueCutoff  = 0.05,
+  readable      = TRUE
+)
+
+ego_cc_down_Par_vs_SL <- enrichGO(
+  gene          = downregulated_entrez_Par_vs_SL,
+  universe      = all_entrez_Par_vs_SL,
+  keyType       = "ENTREZID",
+  OrgDb         = org.Mm.eg.db,
+  ont           = "CC",
+  pAdjustMethod = "BH",
+  qvalueCutoff  = 0.05,
+  readable      = TRUE
+)
+
+ego_mf_down_Par_vs_SL <- enrichGO(
+  gene          = downregulated_entrez_Par_vs_SL,
+  universe      = all_entrez_Par_vs_SL,
+  keyType       = "ENTREZID",
+  OrgDb         = org.Mm.eg.db,
+  ont           = "MF",
+  pAdjustMethod = "BH",
+  qvalueCutoff  = 0.05,
+  readable      = TRUE
+)
+
+# Prepared the results for plotting
+top_bp_down_Par_vs_SL <- ego_bp_down_Par_vs_SL@result %>%
+  arrange(p.adjust) %>%
+  top_n(15, wt = -pvalue) %>%
+  mutate(Category = "Biological Process", logPvalue = -log10(pvalue))
+
+top_cc_down_Par_vs_SL <- ego_cc_down_Par_vs_SL@result %>%
+  arrange(p.adjust) %>%
+  top_n(15, wt = -pvalue) %>%
+  mutate(Category = "Cellular Component", logPvalue = -log10(pvalue))
+
+top_mf_down_Par_vs_SL <- ego_mf_down_Par_vs_SL@result %>%
+  arrange(p.adjust) %>%
+  top_n(15, wt = -pvalue) %>%
+  mutate(Category = "Molecular Function", logPvalue = -log10(pvalue))
+
+combined_results_down_Par_vs_SL <- bind_rows(top_bp_down_Par_vs_SL, top_cc_down_Par_vs_SL, top_mf_down_Par_vs_SL)
+
+# Vizualized combined data in the form of barplots
+ggplot(combined_results_down_Par_vs_SL, aes(x = reorder(Description, pvalue), y = logPvalue, fill = Category)) +
+  geom_bar(stat = "identity") +
+  facet_wrap(~Category, scales = "free") +
+  theme_minimal() +
+  scale_fill_manual(values = cb_palette) +
+  labs(
+    x = "GO Term",
+    y = "-log10(p-value)",
+    title = "Top 15 Gene Function Classification (GO) for Downregulated Genes in Par vs SL"
+  ) +
+  theme(
+    axis.text.x = element_text(angle = 90, hjust = 1, vjust = 1, size = 8),
+    legend.title = element_blank(),
+    legend.position = "bottom",
+    plot.title = element_text(hjust = 0.5, size = 14, face = "bold")
+  ) +
+  guides(fill = guide_legend(reverse = TRUE))
+
+```
+
+KEGG Pathway: Par vs SM
+
+- Par vs SM: Upregulated
+
+```{r, fig.align='center', fig.height=8, fig.width=9, warning=FALSE, error=FALSE, message=FALSE}
+# Extracted the gene names from upregulated genes list and stored in a variable 'upregulated_genes_pathway_Par_vs_SM'
+upregulated_genes_pathway_Par_vs_SM <- rownames(upregulated_Par_vs_SM)
+
+# Converted gene symbols to Entrez IDs using org.Mm.eg.db
+upregulated_entrez_Par_vs_SM <- bitr(upregulated_genes_pathway_Par_vs_SM, fromType = "SYMBOL", toType = "ENTREZID", OrgDb = org.Mm.eg.db)$ENTREZID
+
+# Run KEGG pathway enrichment analysis using enrichKEGG
+kegg_up_Par_vs_SM <- enrichKEGG(
+  gene          = upregulated_entrez_Par_vs_SM,
+  organism      = 'mmu',               # Mouse KEGG pathway
+  pAdjustMethod = "BH",
+  qvalueCutoff  = 0.05
+)
+
+# Created the dotplot
+dotplot <- dotplot(kegg_up_Par_vs_SM , showCategory = 20) + ggtitle("KEGG: Par vs SM upregulated genes")
+
+# Adjusted font sizes for better readability
+dotplot + theme(
+  axis.text.y = element_text(size = 6.5),  # Y-axis text size
+)
+```
+
+
+
+- Par vs SM: Downregulated
+
+```{r, fig.align='center', fig.height=8, fig.width=9, warning=FALSE, error=FALSE, message=FALSE}
+
+# Extracted the gene names from downregulated genes list and stored in a variable 'downregulated_genes_pathway_Par_vs_SM'
+downregulated_genes_pathway_Par_vs_SM <- rownames(downregulated_Par_vs_SM)
+
+# Converted gene symbols to Entrez IDs using org.Mm.eg.db
+downregulated_entrez_Par_vs_SM <- bitr(downregulated_genes_pathway_Par_vs_SM, fromType = "SYMBOL", toType = "ENTREZID", OrgDb = org.Mm.eg.db)$ENTREZID
+
+# Run KEGG pathway enrichment analysis using enrichKEGG
+kegg_down_Par_vs_SM <- enrichKEGG(
+  gene          = downregulated_entrez_Par_vs_SM,
+  organism      = 'mmu',               # Mouse KEGG pathway (use 'hsa' for human)
+  pAdjustMethod = "BH",
+  qvalueCutoff  = 0.05
+)
+
+# Create the dotplot
+dotplot1 <- dotplot(kegg_down_Par_vs_SM , showCategory = 20) + ggtitle("KEGG: Par vs SM Downregulated genes")
+
+# Adjust font sizes using theme()
+dotplot1 + theme(
+  axis.text.y = element_text(size = 6.5),  # Y-axis text size
+)
+```
+
+
+Reactome Pathway: SL vs SM
+
+- SL vs SM: Upregulated Genes
+
+```{r, fig.align='center', fig.height=8, fig.width=15, warning=FALSE, error=FALSE, message=FALSE}
+
+
+# Extracted the gene names from upregulated genes list and stored in a variable 'upregulated_genes_pathway_SL_vs_SM'
+upregulated_genes_pathway_SL_vs_SM <- rownames(upregulated_SL_vs_SM)
+
+# Converted gene symbols to Entrez IDs using org.Mm.eg.db
+upregulated_entrez_SL_vs_SM <- bitr(upregulated_genes_pathway_SL_vs_SM, fromType = "SYMBOL", toType = "ENTREZID", OrgDb = org.Mm.eg.db)$ENTREZID
+
+# Performed reactome pathway enrichment analysis using enrichPathway
+reactome_up_SL_vs_SM <- enrichPathway(
+  gene          = upregulated_entrez_SL_vs_SM,
+  organism      = 'mouse',             # Use 'human' for human data
+  pAdjustMethod = "BH",
+  qvalueCutoff  = 0.05,
+  readable      = TRUE
+)
+
+# Calculated pairwise similarities between enriched terms
+reactome_up_SL_vs_SM1 <- pairwise_termsim(reactome_up_SL_vs_SM)
+
+# Created a tree plot to visualize the enrichment results
+treeplot <- treeplot(reactome_up_SL_vs_SM1) + ggtitle("Reactome Pathway Enrichment (Upregulated Genes in SL vs SM)")
+
+#Printing the plot
+print(treeplot)
+```
+- SL vs SM: Downregulated Genes
+
+```{r, fig.align='center', fig.height=8, fig.width=15, warning=FALSE, error=FALSE, message=FALSE}
+
+# Extracted the gene names from downregulated genes list and stored in a variable 'downregulated_genes_pathway_SL_vs_SM'
+downregulated_genes_pathway_SL_vs_SM <- rownames(downregulated_SL_vs_SM)
+
+# Converted gene symbols to Entrez IDs using org.Mm.eg.db
+downregulated_entrez_SL_vs_SM <- bitr(downregulated_genes_pathway_SL_vs_SM, fromType = "SYMBOL", toType = "ENTREZID", OrgDb = org.Mm.eg.db)$ENTREZID
+
+# Run Reactome pathway enrichment analysis using enrichPathway
+reactome_down_SL_vs_SM <- enrichPathway(
+  gene          = downregulated_entrez_SL_vs_SM,
+  organism      = 'mouse',             # Use 'human' for human data
+  pAdjustMethod = "BH",
+  qvalueCutoff  = 0.05,
+  readable      = TRUE
+)
+
+# Calculated pairwise similarities between enriched terms
+reactome_down_SL_vs_SM1 <- pairwise_termsim(reactome_down_SL_vs_SM)
+
+# Created a tree plot to visualize the enrichment results
+treeplot1 <- treeplot(reactome_down_SL_vs_SM1) + ggtitle("Reactome Pathway Enrichment (Downregulated Genes in SL vs SM)")
+
+# Printing the plot
+print(treeplot1)
+```
+
+**10. Gene Set Enrichment Analysis**
+
+Preparing Gene Sets using Hallmark gene sets from  MSigDB
+```{r}
+
+# Retrieved Hallmark gene sets for Mus musculus
+msig_hallmark <- msigdbr(species = "Mus musculus", category = "H")
+
+# Prepared TERM2GENE as a data frame with two columns: "term" and "gene"
+hallmark_gene_sets <- msig_hallmark %>%
+  dplyr::select(gs_name, entrez_gene) %>%
+  dplyr::rename(term = gs_name, gene = entrez_gene)
+
+```
+
+Generating Ranked Gene Lists
+
+```{r}
+
+# Created a function to generate ranked gene lists
+create_ranked_list <- function(de_results, gene_column = "Gene_names", logfc_column = "logFC") {
+  # Ensured gene symbols are unique
+  de_results <- de_results[!duplicated(de_results[[gene_column]]), ]
+  
+  # Removed any NA values
+  de_results <- de_results[!is.na(de_results[[logfc_column]]), ]
+  
+  # Converted gene symbols to Entrez IDs
+  gene_entrez <- bitr(de_results[[gene_column]],
+                      fromType = "SYMBOL",
+                      toType = "ENTREZID",
+                      OrgDb = org.Mm.eg.db)
+  
+  # Merged with DE results
+  de_results <- merge(de_results, gene_entrez, by.x = gene_column, by.y = "SYMBOL")
+  
+  # Removed any genes that failed to map
+  de_results <- de_results[!is.na(de_results$ENTREZID), ]
+  
+  # Created a named vector for ranking
+  ranked_list <- de_results$logFC
+  names(ranked_list) <- de_results$ENTREZID
+  
+  # Removed duplicates and sort in decreasing order
+  ranked_list <- ranked_list[!duplicated(names(ranked_list))]
+  ranked_list <- sort(ranked_list, decreasing = TRUE)
+  
+  return(ranked_list)
+}
+
+```
+
+Performing GSEA for Each Comparison
+
+A) GSEA: Par vs SL
+```{r, warning=FALSE, message=FALSE, error=FALSE, fig.align='center', fig.height=6, fig.width=10}
+
+# Created ranked list for Par_vs_SL
+ranked_Par_vs_SL <- create_ranked_list(results_Par_vs_SL)
+
+# Run GSEA using clusterProfiler's GSEA function
+gsea_Par_vs_SL <- GSEA(
+  ranked_Par_vs_SL,
+  TERM2GENE = hallmark_gene_sets,
+  pvalueCutoff = 0.05,
+  eps = 0,            # Set eps to zero for better estimation
+  verbose = FALSE
+)
+
+# Extracted pathways with P-value == 1e-10 (extremely significant)
+extremely_significant_Par_vs_SL <- gsea_Par_vs_SL@result %>%
+  filter(pvalue == 1e-10)
+
+# Converted GSEA results to a data frame
+gsea_results_df_Par_vs_SL <- as.data.frame(gsea_Par_vs_SL)
+
+# Combineed top 15 pathways with extremely significant ones
+combined_top_Par_vs_SL <- gsea_results_df_Par_vs_SL %>%
+  arrange(p.adjust) %>%
+  head(15) %>%
+  bind_rows(extremely_significant_Par_vs_SL)
+
+# Removed potential duplicates based on Description
+combined_top_Par_vs_SL <- combined_top_Par_vs_SL %>%
+  distinct(Description, .keep_all = TRUE)
+
+# Created a bar plot for Par_vs_SL
+ggplot(combined_top_Par_vs_SL, aes(x = reorder(Description, NES), y = NES, fill = NES)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  scale_fill_gradient(low = "lightblue", high = "lightcoral") +
+  theme_minimal() +
+  labs(title = "Top Enriched Gene Sets - Par_vs_SL",
+       x = "Gene Set",
+       y = "Normalized Enrichment Score (NES)") +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 16, face = "bold"),
+    axis.text = element_text(size = 12)
+  )
+
+# Displayed the top 20 GSEA results in a scrollable table
+kable(head(gsea_Par_vs_SL, 20), digits=50) %>% kable_styling("striped", full_width = FALSE, position = "center") %>% scroll_box(width = "100%", height = "500px")
+
+```
+
+B) GSEA: Par vs SM
+
+```{r, warning=FALSE, message=FALSE, error=FALSE, fig.align='center', fig.height=6, fig.width=10}
+
+# Created ranked list for Par_vs_SM
+ranked_Par_vs_SM <- create_ranked_list(results_Par_vs_SM)
+
+# Run GSEA
+gsea_Par_vs_SM <- GSEA(
+  ranked_Par_vs_SM,
+  TERM2GENE = hallmark_gene_sets,
+  pvalueCutoff = 0.05,
+  eps = 0,            # Set eps to zero for better estimation
+  verbose = FALSE
+)
+
+# Extracted pathways with P-value == 1e-10 (extremely significant)
+extremely_significant_Par_vs_SM <- gsea_Par_vs_SM@result %>%
+  filter(pvalue == 1e-10)
+
+# Converted GSEA results to a data frame
+gsea_results_df_Par_vs_SM <- as.data.frame(gsea_Par_vs_SM)
+
+# Combined top 15 pathways with extremely significant ones
+combined_top_Par_vs_SM <- gsea_results_df_Par_vs_SM %>%
+  arrange(p.adjust) %>%
+  head(15) %>%
+  bind_rows(extremely_significant_Par_vs_SM)
+
+# Removed potential duplicates based on Description
+combined_top_Par_vs_SM <- combined_top_Par_vs_SM %>%
+  distinct(Description, .keep_all = TRUE)
+
+# Created a bar plot for Par_vs_SM
+ggplot(combined_top_Par_vs_SM, aes(x = reorder(Description, NES), y = NES, fill = NES)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  scale_fill_gradient(low = "lightblue", high = "lightcoral") +
+  theme_minimal() +
+  labs(title = "Top Enriched Gene Sets - Par_vs_SM",
+       x = "Gene Set",
+       y = "Normalized Enrichment Score (NES)") +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 16, face = "bold"),
+    axis.text = element_text(size = 12)
+  )
+
+# Displayed the top 20 GSEA results in a scrollable table
+kable(head(gsea_Par_vs_SM, 20), digits=50) %>% kable_styling("striped", full_width = FALSE, position = "center") %>% scroll_box(width = "100%", height = "500px")
+
+```
+
+C) GSEA: SL vs SM
+
+```{r, warning=FALSE, message=FALSE, error=FALSE, fig.align='center', fig.height=4, fig.width=8}
+
+# Created ranked list for SL_vs_SM
+ranked_SL_vs_SM <- create_ranked_list(results_SL_vs_SM)
+
+# Run GSEA
+gsea_SL_vs_SM <- GSEA(
+  ranked_SL_vs_SM,
+  TERM2GENE = hallmark_gene_sets,
+  pvalueCutoff = 0.05,
+  verbose = FALSE
+)
+
+#Skipping extremely significant step as there are very few enrichments in this group
+
+#Plotting enrichment score for Hallmark Androgen Response
+gseaplot2(gsea_SL_vs_SM, geneSetID = "HALLMARK_ANDROGEN_RESPONSE", title = "HALLMARK_ANDROGEN_RESPONSE")
+
+```
+
+
+**END OF REPORT**
+
+
