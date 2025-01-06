@@ -60,8 +60,6 @@ library(msigdbr)         # For MSigDB gene sets
 library(ggridges)        # Ridge Plots
 library(KEGGREST)        #Allows access to the KEGG REST API
 
-# Set working directory
-setwd("~/Documents/Project/Salivary_glands_project")  # Update this path as necessary
 
 # Imported raw count data from featurecounts tool
 Data<- read.csv("readCounts2.tsv",
